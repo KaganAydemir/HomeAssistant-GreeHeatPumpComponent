@@ -51,19 +51,6 @@ def get_temperature_sensor_options(hass: HomeAssistant) -> list[str]:
     return options
 
 
-SELECTS: tuple[GreeSelectEntityDescription, ...] = (
-    GreeSelectEntityDescription(
-        property_key="external_temperature_sensor",
-        icon="mdi:thermometer-lines",
-        options=[],  # Will be populated dynamically
-        value_fn=lambda device: getattr(device, "_external_temperature_sensor", "None"),
-        set_fn=lambda device, value: setattr(device, "_external_temperature_sensor", None if value == "None" else value),
-        entity_category=EntityCategory.CONFIG,
-        restore_state=True,
-        options_fn=lambda hass: get_temperature_sensor_options(hass),
-    ),
-)
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
