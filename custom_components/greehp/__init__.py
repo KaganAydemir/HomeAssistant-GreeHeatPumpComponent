@@ -34,7 +34,7 @@ from .const import (
     OPTION_KEYS,
 )
 
-PLATFORMS = [Platform.CLIMATE, Platform.SWITCH, Platform.NUMBER, Platform.SELECT, Platform.SENSOR]
+PLATFORMS = [Platform.CLIMATE, Platform.NUMBER, Platform.SENSOR]
 _LOGGER = logging.getLogger(__name__)
 
 # YAML configuration schema

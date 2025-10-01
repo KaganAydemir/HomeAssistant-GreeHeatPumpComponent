@@ -1,6 +1,6 @@
 {
-  "domain": "gree",
-  "name": "Gree A/C",
+  "domain": "greehp",
+  "name": "Gree HeatPump",
   "version": "3.3.0",
   "documentation": "https://github.com/RobHofmann/HomeAssistant-GreeClimateComponent",
   "dependencies": [],

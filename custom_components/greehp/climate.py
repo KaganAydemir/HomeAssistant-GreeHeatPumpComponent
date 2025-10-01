@@ -32,15 +32,14 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from .const import (
     DOMAIN,
     DEFAULT_PORT,
-    HP_MODES,
+    DEFAULT_HVAC_MODES,
     DEFAULT_TARGET_TEMP_STEP,
-    MIN_TEMP_C_B,
-    MIN_TEMP_C_H,
+    MIN_TEMP_C,
+    MIN_TEMP_C,
     MIN_TEMP_F,
-    MAX_TEMP_C_B,
-    MAX_TEMP_C_H,
     MAX_TEMP_F,
     MODES_MAPPING,
+    CONF_HVAC_MODES,
     CONF_ENCRYPTION_KEY,
     CONF_UID,
     CONF_ENCRYPTION_VERSION,
@@ -63,8 +62,8 @@ async def create_gree_device(hass, config):
     port = config.get(CONF_PORT, DEFAULT_PORT)
     mac_addr = config.get(CONF_MAC).encode().replace(b":", b"")
 
-    chm = config.get(HP_MODES)
-    hp_modes = [getattr(HPMode, mode.upper()) for mode in (chm if chm is not None else HP_MODES)]
+    chm = config.get(CONF_HVAC_MODES)
+    hvac_modes = [getattr(HVACMode, mode.upper()) for mode in (chm if chm is not None else DEFAULT_HVAC_MODES)]
 
 
     encryption_key = config.get(CONF_ENCRYPTION_KEY)
@@ -78,7 +77,7 @@ async def create_gree_device(hass, config):
         ip_addr,
         port,
         mac_addr,
-        hp_modes,
+        hvac_modes,
         encryption_version,
         disable_available_check,
         encryption_key,
@@ -117,7 +116,7 @@ class GreeClimate(ClimateEntity):
         ip_addr,
         port,
         mac_addr,
-        hp_modes,
+        hvac_modes,
         encryption_version,
         disable_available_check,
         encryption_key=None,
@@ -145,8 +144,8 @@ class GreeClimate(ClimateEntity):
         self._unit_of_measurement = hass.config.units.temperature_unit
         _LOGGER.info(f"{self._name}: Unit of measurement: {self._unit_of_measurement}")
 
-        self._hp_modes = hp_modes
-        self._hp_mode = HVACMode.OFF
+        self._hvac_modes = hvac_modes
+        self._hvac_mode = HVACMode.OFF
 
         # Store for external temp sensor entity (set by sensor entity)
 
@@ -188,22 +187,23 @@ class GreeClimate(ClimateEntity):
         self._hpOptions = {
             "Pow": None,
             "Mod": None,
-            "CoWatOutTemSet": None,
             "HeWatOutTemSet": None,
             "WatBoxTemSet": None,
             "ColHtWter": None,
             "HetHtWter": None,
             "AllErr": None,
-            "Quiet": None,
-            "WatBoxExt": None,
             "Emegcy": None,
+            "AllOutWatTemHi": None,
+            "AllOutWatTemLo": None,
+            "WatBoxTemHi": None,
+            "WatBoxTemLo": None,
         }
-        self._optionsToFetch = ["Pow", "Mod", "CoWatOutTemSet", "HeWatOutTemSet", "WatBoxTemSet", "ColHtWter", "HetHtWter", "AllErr", "Quiet", "WatBoxExt", "Emegcy", "AllInWatTemHi", "AllInWatTemLo", "AllOutWatTemHi", "AllOutWatTemLo", "HepOutWatTemHi", "HepOutWatTemLo", "WatBoxTemHi", "WatBoxTemLo", "AllInWatTemHi", "AllInWatTemLo", "AllOutWatTemHi", "AllOutWatTemLo", "HepOutWatTemHi", "HepOutWatTemLo", "WatBoxTemHi", "WatBoxTemLo", "RmoHomTemHi", "RmoHomTemLo", "WatBoxElcHeRunSta", "SyAnFroRunSta", "ElcHe1RunSta", "ElcHe2RunSta", "AnFrzzRunSta"]
-
+        self._optionsToFetch = ["Pow", "Mod", "HeWatOutTemSet", "WatBoxTemSet", "ColHtWter", "HetHtWter", "AllErr", "Emegcy",  "AllOutWatTemHi", "AllOutWatTemLo", "WatBoxTemHi", "WatBoxTemLo"]
+        # "CoWatOutTemSet"
 
 
         # helper method to determine TemSen offset
-        self._process_temp_sensor = TempOffsetResolver()
+        #self._process_temp_sensor = TempOffsetResolver()
 
     async def GreeGetValues(self, propertyNames):
         plaintext = '{"cols":' + simplejson.dumps(propertyNames) + ',"mac":"' + str(self._sub_mac_addr) + '","t":"status"}'
@@ -236,7 +236,7 @@ class GreeClimate(ClimateEntity):
         return hpOptions
 
     async def SendStateToAc(self):
-        opt_list = ["Pow", "Mod", "CoWatOutTemSet", "HeWatOutTemSet", "WatBoxTemSet", "Quiet"]
+        opt_list = ["Pow", "Mod", "HeWatOutTemSet", "WatBoxTemSet"]
 
         # Collect values from _hpOptions
         p_values = [self._hpOptions.get(k) for k in opt_list]
@@ -297,12 +297,12 @@ class GreeClimate(ClimateEntity):
     def UpdateHAHpMode(self):
         # Sync current HVAC operation mode to HA
         if self._hpOptions["Pow"] == 0:
-            self._hp_mode = HVACMode.OFF
+            self._hvac_mode = HVACMode.OFF
         else:
             for key, value in MODES_MAPPING.get("Mod").items():
                 if value == (self._hpOptions["Mod"]):
-                    self._hp_mode = key
-        _LOGGER.debug(f"{self._name}: Heat Pump mode updated to {self._hp_mode}")
+                    self._hvac_mode = key
+        _LOGGER.debug(f"{self._name}: Heat Pump mode updated to {self._hvac_mode}")
 
     def UpdateHACurrentBoilerTemperature(self):
         _LOGGER.debug(f"{self._name}: Boiler temperature sensor reading: {self._hpOptions['WatBoxTemHi']*256 - self._hpOptions['WatBoxTemHi']/100 }")
@@ -323,7 +323,7 @@ class GreeClimate(ClimateEntity):
 
         _LOGGER.debug(f"{self._name}: UpdateHARadiatorTemperature: OutEnvTem: {self._hpOptions['AllOutWatTemHi']*256 + self._hpOptions['AllOutWatTemHi']/100}")
         # User hasn't set automatically, so try to determine the offset
-        temp_c = self._process_temp_sensor(self._hpOptions['AllOutWatTemHi']*256 + self._hpOptions['AllOutWatTemHi']/100)
+        temp_c = self._hpOptions['AllOutWatTemHi']*256 + self._hpOptions['AllOutWatTemHi']/100
         _LOGGER.debug("method UpdateHARadiatorTemperature: User has not chosen an offset, using process_temp_sensor() to automatically determine offset.")
 
 
@@ -491,18 +491,18 @@ class GreeClimate(ClimateEntity):
         return self._target_temperature_step
 
     @property
-    def hp_mode(self):
-        _LOGGER.debug(f"{self._name}: hp_mode() = {self._hp_mode}")
+    def hvac_mode(self):
+        _LOGGER.debug(f"{self._name}: hvac_mode() = {self._hvac_mode}")
         # Return current operation mode.
-        return self._hp_mode
+        return self._hvac_mode
 
 
 
     @property
-    def hp_modes(self):
-        _LOGGER.debug(f"{self._name}: hp_modes() = {self._hp_modes}")
+    def hvac_modes(self):
+        _LOGGER.debug(f"{self._name}: hvac_modes() = {self._hvac_modes}")
         # get the list of available operation modes.
-        return self._hp_modes
+        return self._hvac_modes
 
 
     @property
@@ -541,14 +541,14 @@ class GreeClimate(ClimateEntity):
                 self.async_write_ha_state()
 
 
-    async def async_set_hp_mode(self, hp_mode):
+    async def async_set_hvac_mode(self, hvac_mode):
         """Set new operation mode."""
-        _LOGGER.info(f"{self._name}: async_set_hp_mode(): {hp_mode}")
+        _LOGGER.info(f"{self._name}: async_set_hvac_mode(): {hvac_mode}")
         c = {}
-        if hp_mode == HVACMode.OFF:
+        if hvac_mode == HVACMode.OFF:
             c.update({"Pow": 0})
         else:
-            mod = MODES_MAPPING.get("Mod").get(hp_mode)
+            mod = MODES_MAPPING.get("Mod").get(hvac_mode)
             c.update({"Pow": 1, "Mod": mod})
         await self.SyncState(c)
         self.async_write_ha_state()
