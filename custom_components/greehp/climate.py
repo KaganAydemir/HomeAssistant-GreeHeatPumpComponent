@@ -7,6 +7,7 @@ This module defines the climate (HVAC) unit for the Gree integration.
 # Standard library imports
 import base64
 import logging
+import math
 from datetime import timedelta
 
 # Third-party imports
@@ -33,17 +34,20 @@ from .const import (
     DOMAIN,
     DEFAULT_PORT,
     DEFAULT_HVAC_MODES,
+    PRESET_MODES,
     DEFAULT_TARGET_TEMP_STEP,
     MIN_TEMP_C,
-    MIN_TEMP_C,
     MIN_TEMP_F,
+    MAX_TEMP_C,
     MAX_TEMP_F,
     MODES_MAPPING,
+    TEMSEN_OFFSET,
     CONF_HVAC_MODES,
     CONF_ENCRYPTION_KEY,
     CONF_UID,
     CONF_ENCRYPTION_VERSION,
     CONF_DISABLE_AVAILABLE_CHECK,
+    CONF_TEMP_SENSOR_OFFSET,
 )
 from .gree_protocol import Pad, FetchResult, GetDeviceKey, GetGCMCipher, EncryptGCM, GetDeviceKeyGCM
 from .helpers import TempOffsetResolver, gree_f_to_c, gree_c_to_f, encode_temp_c, decode_temp_c
@@ -52,8 +56,7 @@ REQUIREMENTS = ["pycryptodome"]
 
 _LOGGER = logging.getLogger(__name__)
 
-SUPPORT_FLAGS = ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
-
+SUPPORT_FLAGS = ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF | ClimateEntityFeature.PRESET_MODE
 
 async def create_gree_device(hass, config):
     """Create a Gree device instance from config."""
@@ -65,11 +68,17 @@ async def create_gree_device(hass, config):
     chm = config.get(CONF_HVAC_MODES)
     hvac_modes = [getattr(HVACMode, mode.upper()) for mode in (chm if chm is not None else DEFAULT_HVAC_MODES)]
 
-
+    #cfm = config.get(CONF_FAN_MODES)
+    #fan_modes = cfm if cfm is not None else DEFAULT_FAN_MODES
+    #csm = config.get(CONF_SWING_MODES)
+    #swing_modes = csm if csm is not None else DEFAULT_SWING_MODES
+    #cshm = config.get(CONF_SWING_HORIZONTAL_MODES)
+    #swing_horizontal_modes = cshm if cshm is not None else DEFAULT_SWING_HORIZONTAL_MODES
     encryption_key = config.get(CONF_ENCRYPTION_KEY)
     uid = config.get(CONF_UID)
     encryption_version = config.get(CONF_ENCRYPTION_VERSION, 1)
     disable_available_check = config.get(CONF_DISABLE_AVAILABLE_CHECK, False)
+    temp_sensor_offset = config.get(CONF_TEMP_SENSOR_OFFSET)
 
     return GreeClimate(
         hass,
@@ -78,10 +87,14 @@ async def create_gree_device(hass, config):
         port,
         mac_addr,
         hvac_modes,
+        #fan_modes,
+        #swing_modes,
+        #swing_horizontal_modes,
         encryption_version,
         disable_available_check,
         encryption_key,
         uid,
+        temp_sensor_offset,
     )
 
 
@@ -121,6 +134,7 @@ class GreeClimate(ClimateEntity):
         disable_available_check,
         encryption_key=None,
         uid=None,
+        temp_sensor_offset=None,
     ):
         _LOGGER.info(f"{name}: Initializing Gree climate device")
 
@@ -136,7 +150,7 @@ class GreeClimate(ClimateEntity):
         self._unique_id = f"{DOMAIN}_{self._sub_mac_addr}"
         self._device_online = None
         self._disable_available_check = disable_available_check
-        self._target_radiator_temperature = None
+
         self._target_temperature = None
         # Initialize target temperature step with default value (will be overridden by number entity when available)
         self._target_temperature_step = DEFAULT_TARGET_TEMP_STEP
@@ -146,21 +160,19 @@ class GreeClimate(ClimateEntity):
 
         self._hvac_modes = hvac_modes
         self._hvac_mode = HVACMode.OFF
+        self._heating_temperature = None
+
+        self._temp_sensor_offset = temp_sensor_offset
 
         # Store for external temp sensor entity (set by sensor entity)
+        self._external_temperature_sensor = None
 
         # Keep unsub callbacks for deregistering listeners
         self._listeners: list = []
 
-
-
-        self._current_boiler_temperature = None
-        self._current_radiator_temperature = None
-        self._current_tank_heater = None
-        self._current_elec_heater_1 = None
-        self._current_elec_heater_2 = None
-        self._current_frost_protect = None
-
+        self._has_temp_sensor = None
+        self._has_outside_temp_sensor = None
+        self._current_temperature = None
         self._firstTimeRun = True
 
         self._enable_turn_on_off_backwards_compatibility = False
@@ -184,26 +196,22 @@ class GreeClimate(ClimateEntity):
         else:
             self._uid = 0
 
-        self._hpOptions = {
+        self._acOptions = {
             "Pow": None,
             "Mod": None,
-            "HeWatOutTemSet": None,
             "WatBoxTemSet": None,
-            "ColHtWter": None,
-            "HetHtWter": None,
-            "AllErr": None,
-            "Emegcy": None,
-            "AllOutWatTemHi": None,
-            "AllOutWatTemLo": None,
             "WatBoxTemHi": None,
             "WatBoxTemLo": None,
         }
-        self._optionsToFetch = ["Pow", "Mod", "HeWatOutTemSet", "WatBoxTemSet", "ColHtWter", "HetHtWter", "AllErr", "Emegcy",  "AllOutWatTemHi", "AllOutWatTemLo", "WatBoxTemHi", "WatBoxTemLo"]
-        # "CoWatOutTemSet"
+        self._optionsToFetch = ["Pow", "Mod", "WatBoxTemSet", "HeWatOutTemSet", "WatBoxTemHi","WatBoxTemLo"]
 
+        # Initialize auto switches
+
+
+        # Initialize beeper control
 
         # helper method to determine TemSen offset
-        #self._process_temp_sensor = TempOffsetResolver()
+        self._process_temp_sensor = TempOffsetResolver()
 
     async def GreeGetValues(self, propertyNames):
         plaintext = '{"cols":' + simplejson.dumps(propertyNames) + ',"mac":"' + str(self._sub_mac_addr) + '","t":"status"}'
@@ -217,29 +225,29 @@ class GreeClimate(ClimateEntity):
         result = await FetchResult(cipher, self._ip_addr, self._port, jsonPayloadToSend, encryption_version=self.encryption_version)
         return result["dat"][0] if len(result["dat"]) == 1 else result["dat"]
 
-    def SethpOptions(self, hpOptions, newOptionsToOverride, optionValuesToOverride=None):
+    def SetAcOptions(self, acOptions, newOptionsToOverride, optionValuesToOverride=None):
         if optionValuesToOverride is not None:
             # Build a list of key-value pairs for a single log line
             settings = []
             for key in newOptionsToOverride:
                 value = optionValuesToOverride[newOptionsToOverride.index(key)]
                 settings.append(f"{key}={value}")
-                hpOptions[key] = value
+                acOptions[key] = value
             _LOGGER.debug(f"{self._name}: Setting device options with retrieved values: {', '.join(settings)}")
         else:
             # Build a list of key-value pairs for a single log line
             settings = []
             for key, value in newOptionsToOverride.items():
                 settings.append(f"{key}={value}")
-                hpOptions[key] = value
+                acOptions[key] = value
             _LOGGER.debug(f"{self._name}: Overwriting device options with new settings: {', '.join(settings)}")
-        return hpOptions
+        return acOptions
 
     async def SendStateToAc(self):
-        opt_list = ["Pow", "Mod", "HeWatOutTemSet", "WatBoxTemSet"]
+        opt_list = ["Pow", "Mod", "WatBoxTemSet", "HeWatOutTemSet"]
 
-        # Collect values from _hpOptions
-        p_values = [self._hpOptions.get(k) for k in opt_list]
+        # Collect values from _acOptions
+        p_values = [self._acOptions.get(k) for k in opt_list]
 
         # Filter out empty ones
         filtered_opt = []
@@ -261,10 +269,10 @@ class GreeClimate(ClimateEntity):
         result = await FetchResult(cipher, self._ip_addr, self._port, sentJsonPayload, encryption_version=self.encryption_version)
         _LOGGER.debug(f"{self._name}: Command sent successfully: {str(result)}")
 
-    def UpdateHABoilerTargetTemperature(self):
-        # Sync set temperature to HA..
-        temp_c = self._hpOptions["WatBoxTemSet"]
-        temp_f = gree_c_to_f(SetTem=self._hpOptions["WatBoxTemSet"], TemSet=1)
+    def UpdateHATargetTemperature(self):
+
+        temp_c = self._acOptions["WatBoxTemSet"]
+        temp_f = math.floor((self._acOptions["WatBoxTemSet"] * 9/5) + 32)
 
         if self._unit_of_measurement == "°C":
             display_temp = temp_c
@@ -275,80 +283,138 @@ class GreeClimate(ClimateEntity):
             _LOGGER.error(f"{self._name}: Unknown unit of measurement: {self._unit_of_measurement}")
 
         self._target_temperature = display_temp
+        _LOGGER.debug(f"{self._name}: Target temperature set to {self._target_temperature}{self._unit_of_measurement}")
 
-        _LOGGER.debug(f"{self._name}: Boiler Target temperature set to {self._target_temperature}{self._unit_of_measurement}")
-    def UpdateHARadiatorTargetTemperature(self):
-        # Sync set temperature to HA..
-        temp_c = self._hpOptions["HeWatOutTemSet"]
-        temp_f = gree_c_to_f(SetTem=self._hpOptions["HeWatOutTemSet"], TemSet=1)
+    def UpdateHAHeatingTemperature(self):
+
+        temp_c = self._acOptions["HeWatOutTemSet"]
+        temp_f = math.floor((self._acOptions["HeWatOutTemSet"] * 9/5) + 32)
 
         if self._unit_of_measurement == "°C":
-            display_temp = temp_c
+            heating_temperature = temp_c
         elif self._unit_of_measurement == "°F":
-            display_temp = temp_f
+            heating_temperature = temp_f
         else:
-            display_temp = temp_c  # default to deg c
+            heating_temperature = temp_c  # default to deg c
             _LOGGER.error(f"{self._name}: Unknown unit of measurement: {self._unit_of_measurement}")
 
-        self._target_radiator_temperature = display_temp
+        self._heating_temperature = heating_temperature
 
-        _LOGGER.debug(f"{self._name}: Radiator Target temperature set to {self._target_temperature}{self._unit_of_measurement}")
+        _LOGGER.debug(f"{self._name}: Target temperature set to {self._heating_temperature}{self._unit_of_measurement}")
 
-    def UpdateHAHpMode(self):
+    def UpdateHAHvacMode(self):
         # Sync current HVAC operation mode to HA
-        if self._hpOptions["Pow"] == 0:
+        if self._acOptions["Pow"] == 0:
             self._hvac_mode = HVACMode.OFF
         else:
             for key, value in MODES_MAPPING.get("Mod").items():
-                if value == (self._hpOptions["Mod"]):
+                if value == (self._acOptions["Mod"]):
                     self._hvac_mode = key
-        _LOGGER.debug(f"{self._name}: Heat Pump mode updated to {self._hvac_mode}")
+        _LOGGER.debug(f"{self._name}: HVAC mode updated to {self._hvac_mode}")
 
-    def UpdateHACurrentBoilerTemperature(self):
-        _LOGGER.debug(f"{self._name}: Boiler temperature sensor reading: {self._hpOptions['WatBoxTemHi']*256 - self._hpOptions['WatBoxTemHi']/100 }")
-        temp_c = self._hpOptions['WatBoxTemHi']*256 + self._hpOptions['WatBoxTemHi']/100
-        temp_f = gree_c_to_f(SetTem=temp_c, TemRec=0)  # Convert to Fahrenheit using TemRec bit
+    def UpdateHACurrentTemperature(self):
+        # Use external temperature sensor if available
+        if self._external_temperature_sensor:
+            # Use external temperature sensor
+            external_sensor_state = self.hass.states.get(self._external_temperature_sensor)
+            if external_sensor_state and external_sensor_state.state not in ("unknown", "unavailable"):
+                try:
+                    unit = external_sensor_state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
+                    _LOGGER.debug(f"{self._name}: Using external temperature sensor {self._external_temperature_sensor}: {external_sensor_state.state}{unit}")
+                    self._current_temperature = self.hass.config.units.temperature(float(external_sensor_state.state), unit)
+                    _LOGGER.debug(f"{self._name}: Current temperature from external sensor: {self._current_temperature}{self._unit_of_measurement}")
+                    return
+                except (ValueError, TypeError) as ex:
+                    _LOGGER.error(f"{self._name}: Unable to update from external temp sensor {self._external_temperature_sensor}: {ex}")
 
-        if self._unit_of_measurement == "°C":
-            self._current_boiler_temperature = temp_c
-        elif self._unit_of_measurement == "°F":
-            self._current_boiler_temperature = temp_f
-        else:
-            _LOGGER.error("Unknown unit of measurement: %s" % self._unit_of_measurement)
+        # Use built-in AC temperature sensor if available
+        if self._has_temp_sensor:
+            _LOGGER.debug(f"{self._name}: Built-in temperature sensor reading: {(self._acOptions["WatBoxTemHi"] - 100) + (self._acOptions["WatBoxTemLo"]/10)}")
 
-        _LOGGER.debug(f"{self._name}: UpdateHACurrentTemperature: HA current boiler temperature set with device built-in temperature sensor state: {self._current_temperature}{self._unit_of_measurement}")
 
-    def UpdateHARadiatorTemperature(self):
+            temp_c = (self._acOptions["WatBoxTemHi"] - 100) + (self._acOptions["WatBoxTemLo"]/10)
+
+            temp_f = gree_c_to_f(SetTem=temp_c, TemRec=0)  # Convert to Fahrenheit using TemRec bit
+
+            if self._unit_of_measurement == "°C":
+                self._current_temperature = temp_c
+            elif self._unit_of_measurement == "°F":
+                self._current_temperature = temp_f
+            else:
+                _LOGGER.error("Unknown unit of measurement: %s" % self._unit_of_measurement)
+
+            _LOGGER.debug(f"{self._name}: UpdateHACurrentTemperature: HA current temperature set with device built-in temperature sensor state: {self._current_temperature}{self._unit_of_measurement}")
+
+    def UpdateHAOutsideTemperature(self):
         # Update outside temperature from built-in AC outside temperature sensor if available
+        if self._has_outside_temp_sensor:
+            _LOGGER.debug(f"{self._name}: UpdateHAOutsideTemperature: OutEnvTem: {self._acOptions['OutEnvTem']}")
 
-        _LOGGER.debug(f"{self._name}: UpdateHARadiatorTemperature: OutEnvTem: {self._hpOptions['AllOutWatTemHi']*256 + self._hpOptions['AllOutWatTemHi']/100}")
-        # User hasn't set automatically, so try to determine the offset
-        temp_c = self._hpOptions['AllOutWatTemHi']*256 + self._hpOptions['AllOutWatTemHi']/100
-        _LOGGER.debug("method UpdateHARadiatorTemperature: User has not chosen an offset, using process_temp_sensor() to automatically determine offset.")
+            if self._temp_sensor_offset is None:  # user hasn't chosen an offset
+                # User hasn't set automatically, so try to determine the offset
+                temp_c = self._process_temp_sensor(self._acOptions["OutEnvTem"])
+                _LOGGER.debug("method UpdateHAOutsideTemperature: User has not chosen an offset, using process_temp_sensor() to automatically determine offset.")
+            else:
+                # User set
+                if self._temp_sensor_offset is True:
+                    temp_c = self._acOptions["OutEnvTem"] - TEMSEN_OFFSET
+                elif self._temp_sensor_offset is False:
+                    temp_c = self._acOptions["OutEnvTem"]
 
+                _LOGGER.debug(f"method UpdateHAOutsideTemperature: User has chosen an offset ({self._temp_sensor_offset})")
 
-        temp_f = gree_c_to_f(SetTem=temp_c, TemRec=0)  # Convert to Fahrenheit using TemRec bit
+            temp_f = gree_c_to_f(SetTem=temp_c, TemRec=0)  # Convert to Fahrenheit using TemRec bit
 
-        if self._unit_of_measurement == "°C":
-            self._current_radiator_temperature = temp_c
-        elif self._unit_of_measurement == "°F":
-            self._current_radiator_temperature = temp_f
-        else:
-            _LOGGER.error("Unknown unit of measurement for outside temperature: %s" % self._unit_of_measurement)
+            if self._unit_of_measurement == "°C":
+                self._current_outside_temperature = temp_c
+            elif self._unit_of_measurement == "°F":
+                self._current_outside_temperature = temp_f
+            else:
+                _LOGGER.error("Unknown unit of measurement for outside temperature: %s" % self._unit_of_measurement)
 
-        _LOGGER.debug(f"{self._name}: UpdateHARadiatorTemperature: HA radiator temperature set with device built-in outside temperature sensor state: {self._current_outside_temperature}{self._unit_of_measurement}")
-
+            _LOGGER.debug(f"{self._name}: UpdateHAOutsideTemperature: HA outside temperature set with device built-in outside temperature sensor state: {self._current_outside_temperature}{self._unit_of_measurement}")
 
     def UpdateHAStateToCurrentACState(self):
-        self.UpdateHABoilerTargetTemperature()
-        self.UpdateHARadiatorTargetTemperature()
-        self.UpdateHAHpMode()
-        self.UpdateHACurrentBoilerTemperature()
-        self.UpdateHARadiatorTemperature()
+        self.UpdateHATargetTemperature()
+        self.UpdateHAHvacMode()
+        self.UpdateHACurrentTemperature()
+        self.UpdateHAOutsideTemperature()
+        self.UpdateHAHeatingTemperature()
 
-    async def SyncState(self, hpOptions={}):
+    async def SyncState(self, acOptions={}):
         # Fetch current settings from HVAC
         _LOGGER.debug(f"{self._name}: Starting device state sync")
+
+        if self._has_temp_sensor is None:
+            _LOGGER.debug("Attempt to check whether device has an built-in temperature sensor")
+            try:
+                temp_sensor = await self.GreeGetValues(["WatBoxTemHi"])
+            except Exception:
+                _LOGGER.debug("Could not determine whether device has an built-in temperature sensor. Retrying at next update()")
+            else:
+                if temp_sensor:
+                    self._has_temp_sensor = True
+                    _LOGGER.debug("Device has an built-in temperature sensor")
+                else:
+                    self._has_temp_sensor = False
+                    _LOGGER.debug("Device has no built-in temperature sensor")
+
+        # Check if device has outside temperature sensor
+        if self._has_outside_temp_sensor is None:
+            _LOGGER.debug("Attempt to check whether device has an outside temperature sensor")
+            try:
+                outside_temp_sensor = await self.GreeGetValues(["OutEnvTem"])
+            except Exception:
+                _LOGGER.debug("Could not determine whether device has an outside temperature sensor. Retrying at next update()")
+            else:
+                if outside_temp_sensor:
+                    self._has_outside_temp_sensor = True
+                    self._acOptions.update({"OutEnvTem": None})
+                    self._optionsToFetch.append("OutEnvTem")
+                    _LOGGER.debug("Device has an outside temperature sensor")
+                else:
+                    self._has_outside_temp_sensor = False
+                    _LOGGER.debug("Device has no outside temperature sensor")
 
         optionsToFetch = self._optionsToFetch
 
@@ -364,15 +430,15 @@ class GreeClimate(ClimateEntity):
                 if not self._device_online:
                     self._device_online = True
             # Set latest status from device
-            self._hpOptions = self.SethpOptions(self._hpOptions, optionsToFetch, currentValues)
+            self._acOptions = self.SetAcOptions(self._acOptions, optionsToFetch, currentValues)
 
             # Overwrite status with our choices
-            if not (hpOptions == {}):
-                self._hpOptions = self.SethpOptions(self._hpOptions, hpOptions)
+            if not (acOptions == {}):
+                self._acOptions = self.SetAcOptions(self._acOptions, acOptions)
 
             # If not the first (boot) run, update state towards the HVAC
             if not (self._firstTimeRun):
-                if not (hpOptions == {}):
+                if not (acOptions == {}):
                     # loop used to send changed settings from HA to HVAC
                     try:
                         await self.SendStateToAc()
@@ -443,19 +509,15 @@ class GreeClimate(ClimateEntity):
         return self._unit_of_measurement
 
     @property
-    def current_boiler_temperature(self):
-        _LOGGER.debug(f"{self._name}: current_boiler_temperature() = {self._current_boiler_temperature}")
+    def current_temperature(self):
+        _LOGGER.debug(f"{self._name}: current_temperature() = {self._current_temperature}")
         # Return the current temperature.
         return self._current_temperature
+
     @property
-    def current_radiator_temperature(self):
-        _LOGGER.debug(f"{self._name}: current_boiler_temperature() = {self._current_radiator_temperature}")
-        # Return the current temperature.
-        return self._current_temperature
-    @property
-    def min_temp_h(self):
+    def min_temp(self):
         if self._unit_of_measurement == "°C":
-            MIN_TEMP = MIN_TEMP_C_H
+            MIN_TEMP = MIN_TEMP_C
         else:
             MIN_TEMP = MIN_TEMP_F
 
@@ -464,9 +526,9 @@ class GreeClimate(ClimateEntity):
         return MIN_TEMP
 
     @property
-    def max_temp_h(self):
+    def max_temp(self):
         if self._unit_of_measurement == "°C":
-            MAX_TEMP = MAX_TEMP_C_H
+            MAX_TEMP = MAX_TEMP_C
         else:
             MAX_TEMP = MAX_TEMP_F
 
@@ -479,11 +541,6 @@ class GreeClimate(ClimateEntity):
         _LOGGER.debug(f"{self._name}: target_temperature() = {self._target_temperature}")
         # Return the temperature we try to reach.
         return self._target_temperature
-    @property
-    def target_radiator_temperature(self):
-        _LOGGER.debug(f"{self._name}: target_radiator_temperature() = {self._target_radiator_temperature}")
-        # Return the temperature we try to reach.
-        return self._target_radiator_temperature
 
     @property
     def target_temperature_step(self):
@@ -493,18 +550,22 @@ class GreeClimate(ClimateEntity):
     @property
     def hvac_mode(self):
         _LOGGER.debug(f"{self._name}: hvac_mode() = {self._hvac_mode}")
-        # Return current operation mode.
+        # Return current operation mode ie. heat, cool, idle.
         return self._hvac_mode
-
-
 
     @property
     def hvac_modes(self):
         _LOGGER.debug(f"{self._name}: hvac_modes() = {self._hvac_modes}")
         # get the list of available operation modes.
-        return self._hvac_modes
+        #return self._hvac_modes
+        return []
 
-
+    @property
+    def supported_features(self):
+        sf = SUPPORT_FLAGS
+        _LOGGER.debug(f"{self._name}: supported_features() = {sf}")
+        # Return the list of supported features.
+        return sf
     @property
     def unique_id(self):
         # Return unique_id
@@ -520,26 +581,104 @@ class GreeClimate(ClimateEntity):
         )
 
     @property
-    def boiler_temperature(self):
-        _LOGGER.debug(f"{self._name}: boiler_temperature() = {self._current_boiler_temperature}")
-        return self._current_boiler_temperature
+    def outside_temperature(self):
+        """Return the outside temperature if available."""
+        if self._has_outside_temp_sensor:
+            _LOGGER.debug(f"{self._name}: outside_temperature() = {self._current_outside_temperature}")
+            return self._current_outside_temperature
+        return None
 
     @property
-    def radiator_temperature(self):
-        _LOGGER.debug(f"{self._name}: radiator_temperature() = {self._current_radiator_temperature}")
-        return self._current_radiator_temperature
+    def heating_temperature(self):
+        """Return the outside temperature if available."""
+        _LOGGER.debug(f"{self._name}: heating_temperature() = {self._heating_temperature}")
+        return self._heating_temperature
+
+    @property
+    def preset_modes(self):
+        """Return the available preset modes."""
+        return PRESET_MODES
+
+    @property
+    def preset_mode(self):
+        """Return the currently active preset mode."""
+        # Map from AC state to preset
+        if self._acOptions["Mod"] == 2:  # Example: Boiler
+            return "Boyler"
+        elif self._acOptions["Mod"] == 4:  # Example: Boiler and Heating
+            return "Boyler ve Kalorifer"
+        return None
+    @property
+    def extra_state_attributes(self):
+        """Return additional state attributes."""
+        attributes = {}
+
+        # if self.outside_temperature is not None:
+        #     attributes["outside_temperature"] = self.outside_temperature
+        #     attributes["outside_temperature_unit"] = self._unit_of_measurement
+
+        # if self.room_humidity is not None:
+        #     attributes["room_humidity"] = self.room_humidity
+        #     attributes["room_humidity_unit"] = "%"
+
+        return attributes if attributes else None
 
     async def async_set_temperature(self, **kwargs):
         """Set new target temperature."""
         target_temperature = kwargs.get(ATTR_TEMPERATURE)
         if target_temperature is not None:
             # do nothing if temperature is none
-            if not (self._hpOptions["Pow"] == 0):
-                # todo F conversion
-                await self.SyncState({"WatBoxTemSet": int(target_temperature)})
-                _LOGGER.debug(f"{self._name}: async_set_temperature: Set Temp to {target_temperature}{self._unit_of_measurement}")
+            if not (self._acOptions["Pow"] == 0):
+                # do nothing if HVAC is switched off
+
+                if self._unit_of_measurement == "°C":
+                    WatBoxTemSet = target_temperature  # takes care of 1/2 degrees
+                elif self._unit_of_measurement == "°F":
+                    WatBoxTemSet = math.floor((target_temperature * 9/5) + 32)
+                else:
+                    _LOGGER.error("Unable to set temperature. Units not set to °C or °F")
+                    return
+
+                await self.SyncState({"WatBoxTemSet": int(WatBoxTemSet)})
+                _LOGGER.debug(f"{self._name}: async_set_temperature: Set Temp to {target_temperature}{self._unit_of_measurement} ->  SyncState with SetTem={WatBoxTemSet}")
+
                 self.async_write_ha_state()
 
+    async def async_set_heating_temperature(self, **kwargs):
+        """Set new heating temperature."""
+        heating_temperature = kwargs.get(ATTR_TEMPERATURE)
+        if heating_temperature is not None:
+            # do nothing if temperature is none
+            if not (self._acOptions["Pow"] == 0):
+                # do nothing if HVAC is switched off
+
+                if self._unit_of_measurement == "°C":
+                    HeWatOutTemSet = heating_temperature  # takes care of 1/2 degrees
+                elif self._unit_of_measurement == "°F":
+                    HeWatOutTemSet = math.floor((heating_temperature * 9/5) + 32)
+                else:
+                    _LOGGER.error("Unable to set temperature. Units not set to °C or °F")
+                    return
+
+                await self.SyncState({"HeWatOutTemSet": int(HeWatOutTemSet)})
+                _LOGGER.debug(f"{self._name}: async_set_temperature: Set Temp to {heating_temperature}{self._unit_of_measurement} ->  SyncState with SetTem={HeWatOutTemSet}")
+
+                self.async_write_ha_state()
+
+    async def async_set_preset_mode(self, preset_mode: str):
+        """Set the selected preset mode."""
+        if preset_mode not in PRESET_MODES:
+            _LOGGER.error(f"Invalid preset mode: {preset_mode}")
+            return
+
+        # Map your presets to Gree device commands here
+        c = {}  # ensure AC is on
+        if preset_mode == "Boyler":
+            c.update({"Pow": 1, "Mod": 2})
+        elif preset_mode == "Boyler ve Kalorifer":
+            c.update({"Pow": 1, "Mod": 4})
+        await self.SyncState(c)
+        self.async_write_ha_state()
 
     async def async_set_hvac_mode(self, hvac_mode):
         """Set new operation mode."""

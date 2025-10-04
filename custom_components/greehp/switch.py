@@ -35,6 +35,96 @@ class GreeSwitchEntityDescription(GreeEntityDescription, SwitchEntityDescription
     restore_state: bool = False
     """Whether to restore the state of the switch on startup."""
 
+
+SWITCHES: tuple[GreeSwitchEntityDescription, ...] = (
+    GreeSwitchEntityDescription(
+        property_key="xfan",
+        icon="mdi:fan",
+        value_fn=lambda device: device._acOptions.get("Blo") == 1,
+        set_fn=_set_xfan,
+    ),
+    GreeSwitchEntityDescription(
+        property_key="lights",
+        icon="mdi:lightbulb",
+        value_fn=lambda device: device._acOptions.get("Lig") == 1,
+        set_fn=_set_lights,
+    ),
+    GreeSwitchEntityDescription(
+        property_key="health",
+        icon="mdi:shield-check",
+        value_fn=lambda device: device._acOptions.get("Health") == 1,
+        set_fn=_set_health,
+    ),
+    GreeSwitchEntityDescription(
+        property_key="powersave",
+        icon="mdi:leaf",
+        value_fn=lambda device: device._acOptions.get("SvSt") == 1,
+        set_fn=_set_powersave,
+        exists_fn=lambda description, device: HVACMode.COOL in device._hvac_modes,
+        available_fn=lambda device: device._hvac_mode == HVACMode.COOL,
+    ),
+    GreeSwitchEntityDescription(
+        property_key="eightdegheat",
+        icon="mdi:thermometer-low",
+        value_fn=lambda device: device._acOptions.get("StHt") == 1,
+        set_fn=_set_eightdegheat,
+        exists_fn=lambda description, device: HVACMode.HEAT in device._hvac_modes,
+        available_fn=lambda device: device._hvac_mode == HVACMode.HEAT,
+    ),
+    GreeSwitchEntityDescription(
+        property_key="sleep",
+        icon="mdi:sleep",
+        value_fn=lambda device: device._acOptions.get("SwhSlp") == 1 and device._acOptions.get("SlpMod") == 1,
+        set_fn=_set_sleep,
+        available_fn=lambda device: device._hvac_mode in (HVACMode.COOL, HVACMode.HEAT),
+    ),
+    GreeSwitchEntityDescription(
+        property_key="air",
+        icon="mdi:air-filter",
+        value_fn=lambda device: device._acOptions.get("Air") == 1,
+        set_fn=_set_air,
+    ),
+    GreeSwitchEntityDescription(
+        property_key="anti_direct_blow",
+        icon="mdi:weather-windy",
+        value_fn=lambda device: device._acOptions.get("AntiDirectBlow") == 1,
+        set_fn=_set_anti_direct_blow,
+        available_fn=lambda device: getattr(device, "_has_anti_direct_blow", False),
+    ),
+    GreeSwitchEntityDescription(
+        property_key="light_sensor",
+        icon="mdi:lightbulb-on",
+        value_fn=lambda device: device._acOptions.get("LigSen") == 0,  # LigSen=0 means sensor is active
+        set_fn=_set_light_sensor,
+        available_fn=lambda device: getattr(device, "_has_light_sensor", False),
+    ),
+    # These entities are not kept in the climate device
+    GreeSwitchEntityDescription(
+        property_key="auto_xfan",
+        icon="mdi:fan-auto",
+        value_fn=lambda device: getattr(device, "_auto_xfan", False),
+        set_fn=_set_auto_xfan,
+        restore_state=True,
+        entity_category=EntityCategory.CONFIG,
+    ),
+    GreeSwitchEntityDescription(
+        property_key="auto_light",
+        icon="mdi:lightbulb-auto",
+        value_fn=lambda device: getattr(device, "_auto_light", False),
+        set_fn=_set_auto_light,
+        restore_state=True,
+        entity_category=EntityCategory.CONFIG,
+    ),
+    GreeSwitchEntityDescription(
+        property_key="beeper",
+        icon="mdi:volume-high",
+        value_fn=lambda device: getattr(device, "_beeper_enabled", True),
+        set_fn=_set_beeper,
+        restore_state=True,
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,

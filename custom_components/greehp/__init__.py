@@ -26,15 +26,16 @@ from .const import (
     CONF_DISABLE_AVAILABLE_CHECK,
     CONF_ENCRYPTION_KEY,
     CONF_ENCRYPTION_VERSION,
-    CONF_HP_MODES,
+    CONF_HVAC_MODES,
+    CONF_TEMP_SENSOR_OFFSET,
     CONF_UID,
-    HP_MODES,
+    DEFAULT_HVAC_MODES,
     DEFAULT_PORT,
     DOMAIN,
     OPTION_KEYS,
 )
 
-PLATFORMS = [Platform.CLIMATE, Platform.NUMBER, Platform.SENSOR]
+PLATFORMS = [Platform.CLIMATE, Platform.NUMBER]
 _LOGGER = logging.getLogger(__name__)
 
 # YAML configuration schema
@@ -47,8 +48,9 @@ CLIMATE_SCHEMA = vol.Schema(
         vol.Optional(CONF_ENCRYPTION_KEY): cv.string,
         vol.Optional(CONF_UID): cv.positive_int,
         vol.Optional(CONF_ENCRYPTION_VERSION, default=1): vol.In([1, 2]),
-        vol.Optional(CONF_HP_MODES, default=HP_MODES): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(CONF_HVAC_MODES, default=DEFAULT_HVAC_MODES): vol.All(cv.ensure_list, [cv.string]),
         vol.Optional(CONF_DISABLE_AVAILABLE_CHECK, default=False): cv.boolean,
+        vol.Optional(CONF_TEMP_SENSOR_OFFSET): cv.boolean,
     }
 )
 

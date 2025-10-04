@@ -25,8 +25,10 @@ from .const import (
     CONF_DISABLE_AVAILABLE_CHECK,
     CONF_ENCRYPTION_KEY,
     CONF_ENCRYPTION_VERSION,
-    CONF_HP_MODES,
+    CONF_HVAC_MODES,
+    CONF_TEMP_SENSOR_OFFSET,
     CONF_UID,
+    DEFAULT_HVAC_MODES,
     DEFAULT_PORT,
     DOMAIN,
     OPTION_KEYS,
@@ -251,15 +253,18 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         schema = vol.Schema(
             {
                 vol.Optional(
-                    CONF_HP_MODES,
-                    description={"suggested_value": options.get(CONF_HP_MODES, HP_MODES)},
-                    default=options.get(CONF_HP_MODES, HP_MODES),
-                ): vol.Any(None, selector.SelectSelector(selector.SelectSelectorConfig(options=HP_MODES, multiple=True, custom_value=True, translation_key=CONF_HP_MODES))),
-
+                    CONF_HVAC_MODES,
+                    description={"suggested_value": options.get(CONF_HVAC_MODES, DEFAULT_HVAC_MODES)},
+                    default=options.get(CONF_HVAC_MODES, DEFAULT_HVAC_MODES),
+                ): vol.Any(None, selector.SelectSelector(selector.SelectSelectorConfig(options=DEFAULT_HVAC_MODES, multiple=True, custom_value=True, translation_key=CONF_HVAC_MODES))),
                 vol.Optional(
                     CONF_DISABLE_AVAILABLE_CHECK,
                     default=options.get(CONF_DISABLE_AVAILABLE_CHECK, False),
                 ): bool,
+                vol.Optional(
+                    CONF_TEMP_SENSOR_OFFSET,
+                    description={"suggested_value": options.get(CONF_TEMP_SENSOR_OFFSET)},
+                ): vol.Any(None, bool),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)

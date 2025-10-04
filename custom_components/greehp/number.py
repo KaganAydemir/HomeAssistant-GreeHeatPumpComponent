@@ -34,14 +34,14 @@ class GreeNumberEntityDescription(GreeEntityDescription, NumberEntityDescription
 
 NUMBERS: tuple[GreeNumberEntityDescription, ...] = (
     GreeNumberEntityDescription(
-        property_key="target_temp_step",
-        icon="mdi:arrow-expand-vertical",
-        native_min_value=0.1,
-        native_max_value=5.0,
-        native_step=0.1,
+        property_key="heating_temperature",
+        icon="mdi:fire",
+        native_min_value=20,
+        native_max_value=60,
+        native_step=1,
         mode=NumberMode.SLIDER,
-        value_fn=lambda device: getattr(device, "_target_temperature_step", DEFAULT_TARGET_TEMP_STEP),
-        set_fn=lambda device, value: setattr(device, "_target_temperature_step", value),
+        value_fn=lambda device: getattr(device, "_heating_temperature", 45),  # default value
+        set_fn=lambda device, value: setattr(device, "_heating_temperature", value),
         entity_category=EntityCategory.CONFIG,
         restore_state=True,
     ),

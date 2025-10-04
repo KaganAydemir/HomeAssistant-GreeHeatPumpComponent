@@ -34,20 +34,21 @@ class GreeSensorEntityDescription(GreeEntityDescription, SensorEntityDescription
 
 SENSORS: tuple[GreeSensorEntityDescription, ...] = (
     GreeSensorEntityDescription(
-        property_key="radiator_temperature",
+        property_key="outside_temperature",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=0,
-        value_fn=lambda device: device.radiator_temperature,
-        available_fn=lambda device: device.available,
+        value_fn=lambda device: device.outside_temperature if device._has_outside_temp_sensor else None,
+        available_fn=lambda device: device.available and device._has_outside_temp_sensor,
     ),
     GreeSensorEntityDescription(
-        property_key="boiler_temperature",
-        device_class=SensorDeviceClass.TEMPERATURE,
+        property_key="room_humidity",
+        device_class=SensorDeviceClass.HUMIDITY,
         state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=PERCENTAGE,
         suggested_display_precision=0,
-        value_fn=lambda device: device.boiler_temperature,
-        available_fn=lambda device: device.available,
+        value_fn=lambda device: device.room_humidity if device._has_room_humidity_sensor else None,
+        available_fn=lambda device: device.available and device._has_room_humidity_sensor,
     ),
 )
 
